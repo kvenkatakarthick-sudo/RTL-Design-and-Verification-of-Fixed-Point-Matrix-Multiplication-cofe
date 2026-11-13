@@ -1,0 +1,112 @@
+
+`timescale 1ns/1ps
+module tb;
+  parameter N = 3, W = 16, F = 8;
+
+  reg clk = 0, rst_n = 0, start = 0;
+  reg  [N*N*W-1:0] a_flat, b_flat;
+  wire [N*N*W-1:0] c_flat;
+  wire busy, done;
+
+  matmul_fx #(.N(N), .W(W), .F(F)) dut (
+    .clk(clk), .rst_n(rst_n), .start(start),
+    .a_flat(a_flat), .b_flat(b_flat),
+    .c_flat(c_flat), .busy(busy), .done(done)
+  );
+
+  always #5 clk = ~clk;
+
+  integer i, j, k, t, errors, tests;
+  reg signed [63:0] sum;
+  reg signed [63:0] maxv, minv;
+  reg signed [W-1:0] ea, eb, got, exp;
+
+  task run_test;
+    begin
+      @(negedge clk); start = 1;
+      @(negedge clk); start = 0;
+      wait (done);
+      @(negedge clk);
+      check_result;
+      tests = tests + 1;
+    end
+  endtask
+
+  task check_result;
+    begin
+      for (i = 0; i < N; i = i + 1)
+        for (j = 0; j < N; j = j + 1) begin
+          sum = 0;
+          for (k = 0; k < N; k = k + 1) begin
+            ea = a_flat[(i*N+k)*W +: W];
+            eb = b_flat[(k*N+j)*W +: W];
+            sum = sum + ea * eb;
+          end
+          sum = (sum + (64'sd1 <<< (F-1))) >>> F;
+          if (sum > maxv) sum = maxv;
+          if (sum < minv) sum = minv;
+          exp = sum[W-1:0];
+          got = c_flat[(i*N+j)*W +: W];
+          if (got !== exp) begin
+            errors = errors + 1;
+            $display("MISMATCH test %0d C[%0d][%0d]: got %0d exp %0d",
+                     tests, i, j, got, exp);
+          end
+        end
+    end
+  endtask
+
+  task randomize_inputs(input integer mode);
+    begin
+      for (i = 0; i < N*N; i = i + 1) begin
+        case (mode)
+          0: begin a_flat[i*W +: W] = $random; b_flat[i*W +: W] = $random; end
+          1: begin a_flat[i*W +: W] = $random % 512; b_flat[i*W +: W] = $random % 512; end
+          default: begin a_flat[i*W +: W] = 16'h7FFF; b_flat[i*W +: W] = 16'h7FFF; end
+        endcase
+      end
+    end
+  endtask
+
+  initial begin
+    $dumpfile("dump.vcd"); $dumpvars(0, tb);
+    errors = 0; tests = 0;
+    maxv = (64'sd1 <<< (W-1)) - 1;
+    minv = -(64'sd1 <<< (W-1));
+    a_flat = 0; b_flat = 0;
+    repeat (3) @(posedge clk);
+    rst_n = 1;
+
+    // Directed 1: identity * random => C == B
+    for (i = 0; i < N; i = i + 1)
+      for (j = 0; j < N; j = j + 1) begin
+        a_flat[(i*N+j)*W +: W] = (i == j) ? (1 << F) : 0;
+        b_flat[(i*N+j)*W +: W] = $random;
+      end
+    run_test;
+
+    // Directed 2: zeros
+    a_flat = 0; run_test;
+
+    // Directed 3: positive saturation
+    randomize_inputs(2); run_test;
+
+    // Directed 4: negative saturation
+    for (i = 0; i < N*N; i = i + 1) begin
+      a_flat[i*W +: W] = 16'h8000; b_flat[i*W +: W] = 16'h7FFF;
+    end
+    run_test;
+
+    // Random tests
+    for (t = 0; t < 200; t = t + 1) begin randomize_inputs(0); run_test; end
+    for (t = 0; t < 200; t = t + 1) begin randomize_inputs(1); run_test; end
+
+    $display("----------------------------------------");
+    if (errors == 0) $display("PASS: %0d tests, 0 errors", tests);
+    else             $display("FAIL: %0d tests, %0d errors", tests, errors);
+    $display("----------------------------------------");
+    $finish;
+  end
+
+  initial begin #5_000_000; $display("TIMEOUT"); $finish; end
+endmodule
